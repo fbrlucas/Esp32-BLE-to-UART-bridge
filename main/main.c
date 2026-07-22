@@ -567,6 +567,11 @@ void ble_server_uart_task(void *pvParameters)
             }
 #endif
 
+            if (connection->Uart_port == UART_NUM_1)
+            {
+                uart_write_bytes(UART_NUM_0, aggregate, aggregate_len);
+            }
+
             if (subscribed &&
                 active_conn != BLE_HS_CONN_HANDLE_NONE)
             {
@@ -685,8 +690,8 @@ void app_main(void) {
   Port0.tx = GPIO_NUM_6;
   Port0.rx = GPIO_NUM_7;
 #else
-  Port0.tx = GPIO_NUM_9;
-  Port0.rx = GPIO_NUM_10;
+  Port0.tx = GPIO_NUM_21;
+  Port0.rx = GPIO_NUM_20;
 #endif
   Port1.Uart_port = UART_NUM_1;
   Port1.tx = GPIO_NUM_4;
