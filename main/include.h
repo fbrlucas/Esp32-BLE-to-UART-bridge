@@ -17,6 +17,7 @@
 #include "nvs_flash.h"
 #include "task/ble/ble.h"
 #include "task/led/led.h"
+#include "task/sdcard/sdcard.h"
 /* BLE */
 #include "driver/uart.h"
 #include "host/ble_hs.h"
@@ -48,27 +49,12 @@ extern "C" {
 #endif
 #define UART_IDLE_TIMEOUT_US 5000
 
-#if CONFIG_IDF_TARGET_ESP32S3     
-    #define BLE_SVC_SPP_UUID16_THIRD                                         0xAC00
-    #define BLE_SVC_SPP_CHR_UUID16_UART_2_BAUD_RATE                          0xAC03
-    #define BLE_SVC_SPP_CHR_UUID16_WRITE_UART_2                              0xAC01
-    #define BLE_SVC_SPP_CHR_UUID16_READ_UART_2                               0xAC02 
-#endif
-
-
 /* 16 Bit SPP Service UUID */
-#define BLE_SVC_SPP_UUID16                                  0xABF0
 #define BLE_SVC_SPP_UUID16_SECOND                           0xABE0
 /* 16 Bit SPP Service Characteristic UUID */
 
-#define BLE_SVC_SPP_CHR_UUID16_WRITE_UART_1                              0xABF1
-#define BLE_SVC_SPP_CHR_UUID16_READ_UART_1                               0xABF2 
-
 #define BLE_SVC_SPP_CHR_UUID16_WRITE_UART_0                              0xABE1
-#define BLE_SVC_SPP_CHR_UUID16_READ_UART_0                               0xABE2 
-
-#define BLE_SVC_SPP_CHR_UUID16_UART_0_BAUD_RATE                          0xABE3
-#define BLE_SVC_SPP_CHR_UUID16_UART_1_BAUD_RATE                          0XABF3
+#define BLE_SVC_SPP_CHR_UUID16_READ_UART_0                               0xABE2
 
 #define BLE_DEFAULT_MTU                                                  20
 #define BLE_PREFERRED_MTU                                                517

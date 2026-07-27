@@ -1,4 +1,5 @@
 dependencies:
+  idf:
+    version: ">=5.0"
   nimble_peripheral_utils:
     path: ${IDF_PATH}/examples/bluetooth/nimble/common/nimble_peripheral_utils
-  espressif/led_strip: '*'

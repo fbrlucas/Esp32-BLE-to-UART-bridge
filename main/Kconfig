@@ -1,11 +1,5 @@
 menu ESP-UART-BLE-Brigde-Options
 
-config USE_RGB_LED 
-    bool "Use S3 RGB LED For status"
-    default n
-    help
-        Use S3 RGB LED For status
-
 config DEBUG
     bool "Enable debug logging"
     default n
@@ -30,4 +24,53 @@ config BLE_TX_POWER_DEFAULT
     default 3
     help
         Set default BLE transmit power in dBm
+
+config STATUS_LED_GPIO
+    int "Status LED GPIO"
+    default 3
+    help
+        GPIO driving the status LED. The historical pin was GPIO8, which now
+        defaults to the SD card SPI clock.
+
+menu "SD card logger"
+
+config ENABLE_SDCARD
+    bool "Enable SD card logging over SPI"
+    default y
+    help
+        Try to mount an SD card at boot. When a card is present every byte
+        received on UART0 is appended to /sdcard/LOGnnn.TXT instead of being
+        notified over BLE. When no card is present the plain BLE-UART bridge
+        flow is kept.
+
+config SDCARD_PIN_CLK
+    int "SD SPI SCK GPIO"
+    depends on ENABLE_SDCARD
+    default 8
+
+config SDCARD_PIN_MISO
+    int "SD SPI MISO GPIO"
+    depends on ENABLE_SDCARD
+    default 9
+
+config SDCARD_PIN_MOSI
+    int "SD SPI MOSI GPIO"
+    depends on ENABLE_SDCARD
+    default 10
+
+config SDCARD_PIN_CS
+    int "SD SPI CS GPIO"
+    depends on ENABLE_SDCARD
+    default 7
+
+config SDCARD_SPI_FREQ_KHZ
+    int "SD SPI clock (kHz)"
+    depends on ENABLE_SDCARD
+    range 400 40000
+    default 20000
+    help
+        Lower this if the wiring is long or unshielded. 20 MHz is the usual
+        safe limit for a breadboarded SPI card slot.
+
+endmenu
 endmenu
