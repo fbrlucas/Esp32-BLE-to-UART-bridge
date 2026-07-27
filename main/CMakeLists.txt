@@ -5,5 +5,6 @@ if(NOT "${IDF_TARGET}" STREQUAL "esp32c3")
 endif()
 
 idf_component_register(SRCS "${srcs}" "task/led/led.c" "task/ble/ble.c"
-                              "task/sdcard/sdcard.c"
-                       INCLUDE_DIRS "." "task/led" "task/ble" "task/sdcard")
+                              "task/sdcard/sdcard.c" "task/battery/battery.c"
+                       INCLUDE_DIRS "." "task/led" "task/ble" "task/sdcard"
+                                    "task/battery")

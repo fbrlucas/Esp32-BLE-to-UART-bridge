@@ -27,10 +27,10 @@ config BLE_TX_POWER_DEFAULT
 
 config STATUS_LED_GPIO
     int "Status LED GPIO"
-    default 3
+    default 7
     help
-        GPIO driving the status LED. The historical pin was GPIO8, which now
-        defaults to the SD card SPI clock.
+        GPIO driving the status LED. The historical pin was GPIO8, which is
+        now the SD card SPI clock.
 
 menu "SD card logger"
 
@@ -61,7 +61,7 @@ config SDCARD_PIN_MOSI
 config SDCARD_PIN_CS
     int "SD SPI CS GPIO"
     depends on ENABLE_SDCARD
-    default 7
+    default 3
 
 config SDCARD_SPI_FREQ_KHZ
     int "SD SPI clock (kHz)"
@@ -71,6 +71,44 @@ config SDCARD_SPI_FREQ_KHZ
     help
         Lower this if the wiring is long or unshielded. 20 MHz is the usual
         safe limit for a breadboarded SPI card slot.
+
+endmenu
+
+menu "Battery monitor"
+
+config ENABLE_BATTERY_MONITOR
+    bool "Enable battery voltage monitor"
+    default y
+    help
+        Sample the battery voltage on GPIO2 (ADC1 channel 2) and blink the
+        status LED while the pack is below the low threshold.
+
+config BATTERY_PERIOD_MS
+    int "Sampling period (ms)"
+    depends on ENABLE_BATTERY_MONITOR
+    range 1000 600000
+    default 10000
+
+config BATTERY_SAMPLES
+    int "Samples averaged per measurement"
+    depends on ENABLE_BATTERY_MONITOR
+    range 1 256
+    default 16
+
+config BATTERY_LOW_MV
+    int "Low battery threshold (mV)"
+    depends on ENABLE_BATTERY_MONITOR
+    range 1000 5000
+    default 3000
+
+config BATTERY_DIVIDER_RATIO
+    int "External divider ratio"
+    depends on ENABLE_BATTERY_MONITOR
+    range 1 10
+    default 2
+    help
+        Measured voltage is multiplied by this. Use 2 for the usual pair of
+        equal resistors halving the pack voltage into the ADC pin.
 
 endmenu
 endmenu

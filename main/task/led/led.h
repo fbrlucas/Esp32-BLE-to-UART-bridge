@@ -1,23 +1,14 @@
-#include "soc/gpio_num.h"
-#include <stdint.h> 
+#ifndef H_LED_
+#define H_LED_
 
-#define LED_CONNECTION_UPDATE_TIME                                       1000000
+#define LED_LOW_BATTERY_LIT_MS 200
+#define LED_LOW_BATTERY_DARK_MS 1800
+#define LED_IDLE_POLL_MS 500
 
+/* Open-drain against an active-low LED: pulling the pin down lights it. */
+#define LED_ON_LEVEL 0
+#define LED_OFF_LEVEL 1
 
-struct blink_structure
-{
-    gpio_num_t pin;
-    uint32_t time_on_ms; 
-    uint32_t time_off_ms; 
-} typedef blinkParameters_t ;
+void led_task(void *pvParameters);
 
-
-enum {
-    CONNECTED,
-    DISCONNECTED,
-    WAITING
-} typedef BleState_e ;
-
-
-void led_task(void *pvParameters); 
-blinkParameters_t get_current_ble_state_config(BleState_e *current_state);
+#endif /* H_LED_ */

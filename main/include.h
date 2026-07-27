@@ -15,6 +15,7 @@
 #include "host/ble_gap.h"
 #include "host/ble_hs_adv.h"
 #include "nvs_flash.h"
+#include "task/battery/battery.h"
 #include "task/ble/ble.h"
 #include "task/led/led.h"
 #include "task/sdcard/sdcard.h"

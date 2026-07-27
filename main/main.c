@@ -26,8 +26,6 @@ static uint16_t active_conn = BLE_HS_CONN_HANDLE_NONE;
 u_int16_t ble_spp_tx_handle_uart_0;
 u_int16_t ble_spp_rx_handle_uart_0;
 
-static BleState_e led_state = DISCONNECTED;
-
 static UartConnection Port0 = {0};
 
 void ble_store_config_init(void);
@@ -546,7 +544,7 @@ get_esp32_power_value_based_on_int(int8_t power_configuration) {
 
 void app_main(void) {
   int rc;
-  xTaskCreate(led_task, "uTaskBlink", 2048, (void *)&led_state, 2, NULL);
+  xTaskCreate(led_task, "uTaskBlink", 2048, NULL, 2, NULL);
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -560,6 +558,10 @@ void app_main(void) {
   Port0.rx = GPIO_NUM_20;
 
   usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
+
+#if CONFIG_ENABLE_BATTERY_MONITOR
+  battery_init();
+#endif
 
 #if CONFIG_ENABLE_SDCARD
   if (sdcard_init()) {
