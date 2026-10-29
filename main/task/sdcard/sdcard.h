@@ -10,11 +10,18 @@ extern "C" {
 #endif
 
 /**
- * Initialises the SPI bus, mounts the SD card and opens a new log file.
- * Must be called once, before the UART tasks are started.
+ * Initialises the SPI bus, mounts the SD card and starts the writer task.
+ * The log file is created on the first "DD-MM HH:MM:SS" timestamp seen in the
+ * UART stream and named DD-MM_HH-MM-SS.TXT (DD-MM_HH-MM-SS_N.TXT when taken).
+ * Without a timestamp in the first SDCARD_CHUNK_SIZE bytes or
+ * SDCARD_TIMESTAMP_WAIT_US, it falls back to LOGnnn.TXT. When the battery
+ * monitor reports low battery, the writer task flushes and closes the file and
+ * unmounts the card. Must be called once, after battery_init() and before the
+ * UART tasks are started.
  *
  * @return true when a card was mounted and logging is active, false when no
- *         card is present (the application must keep the BLE bridge flow).
+ *         card is present or the battery is already low (the application must
+ *         keep the BLE bridge flow).
  */
 bool sdcard_init(void);
 

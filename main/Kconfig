@@ -32,6 +32,14 @@ config STATUS_LED_GPIO
         GPIO driving the status LED. The historical pin was GPIO8, which is
         now the SD card SPI clock.
 
+config LOG_LINE_PREFIX
+    string "Prefix for ESP log lines on USB"
+    default "[ESP] "
+    help
+        Prepended to every ESP_LOG line written to the USB console so the
+        firmware's own messages can be told apart from the bytes received on
+        UART0. Bytes from the target are never prefixed.
+
 menu "SD card logger"
 
 config ENABLE_SDCARD

@@ -9,7 +9,8 @@ extern "C" {
 #endif
 
 /**
- * Configures ADC1 on the battery sense pin and starts the monitor task.
+ * Configures ADC1 on the battery sense pin, takes the first measurement
+ * synchronously and starts the monitor task.
  *
  * @return true when the monitor is running.
  */

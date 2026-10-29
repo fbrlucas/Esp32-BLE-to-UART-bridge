@@ -6,8 +6,8 @@
 #define LED_IDLE_POLL_MS 500
 
 /* Open-drain against an active-low LED: pulling the pin down lights it. */
-#define LED_ON_LEVEL 0
-#define LED_OFF_LEVEL 1
+#define LED_ON_LEVEL 1
+#define LED_OFF_LEVEL 0
 
 void led_task(void *pvParameters);
 

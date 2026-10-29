@@ -372,111 +372,99 @@ int gatt_svr_init(void) {
   return 0;
 }
 
-void ble_server_uart_task(void *pvParameters)
-{
-    UartConnection *connection = (UartConnection *)pvParameters;
+static uint8_t uart_aggregate[2048];
 
-    uart_event_t event;
+static void ble_notify_uart0(const uint8_t *data, size_t len) {
+  uint16_t conn = active_conn;
+  uint16_t mtu = ble_att_mtu(conn);
+  size_t payload =
+      (mtu > BLE_HEADER_SIZE) ? (mtu - BLE_HEADER_SIZE) : BLE_DEFAULT_MTU;
 
-    uint8_t aggregate[2048];
-    size_t aggregate_len = 0;
+  for (size_t off = 0; off < len; off += payload) {
+    uint16_t chunk = (uint16_t)MIN(payload, len - off);
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data + off, chunk);
 
-    int64_t last_rx = 0;
+    if (om == NULL) {
+      ESP_LOGW("BLE", "no mbuf, dropped %u bytes", (unsigned)(len - off));
+      return;
+    }
 
-    while (1)
-    {
-        if (xQueueReceive(connection->Uart_queue_handle,
-                          &event,
-                          pdMS_TO_TICKS(20)))
-        {
-            if (event.type == UART_DATA)
-            {
-                size_t available = 0;
+    /* ble_gatts_notify_custom() consumes om on every path, errors included. */
+    int rc = ble_gatts_notify_custom(conn, ble_spp_tx_handle_uart_0, om);
 
-                uart_get_buffered_data_len(
-                    connection->Uart_port,
-                    &available);
+    if (rc != 0) {
+      ESP_LOGW("BLE", "notify rc=%d, dropped %u bytes", rc,
+               (unsigned)(len - off));
+      return;
+    }
+  }
+}
 
-                while (available > 0)
-                {
-                    int len = uart_read_bytes(
-                        connection->Uart_port,
-                        aggregate + aggregate_len,
-                        MIN(available,
-                            sizeof(aggregate) - aggregate_len),
-                        0);
+static void uart_dispatch(const uint8_t *data, size_t len) {
+  bool subscribed = uart0_notify;
 
-                    if (len <= 0)
-                        break;
-
-                    aggregate_len += len;
-
-                    uart_get_buffered_data_len(
-                        connection->Uart_port,
-                        &available);
-                }
-
-                last_rx = esp_timer_get_time();
-            }
-        }
-
-        bool timeout =
-            aggregate_len > 0 &&
-            (esp_timer_get_time() - last_rx >
-             UART_IDLE_TIMEOUT_US);
-
-        if (timeout)
-        {
-            bool subscribed = uart0_notify;
-
-            fwrite(aggregate, 1, aggregate_len, stdout);
-            fflush(stdout);
+  console_write_data(data, len);
 
 #if CONFIG_ENABLE_SDCARD
-            if (sdcard_is_present())
-            {
-                sdcard_write(aggregate, aggregate_len);
-                subscribed = false;
-            }
+  if (sdcard_is_present()) {
+    sdcard_write(data, len);
+    subscribed = false;
+  }
 #endif
 
-            if (subscribed &&
-                active_conn != BLE_HS_CONN_HANDLE_NONE)
-            {
-                uint16_t mtu = ble_att_mtu(active_conn);
+  if (subscribed && active_conn != BLE_HS_CONN_HANDLE_NONE) {
+    ble_notify_uart0(data, len);
+  }
+}
 
-                int payload =
-                    (mtu > 3) ? (mtu - 3) : 20;
+void ble_server_uart_task(void *pvParameters) {
+  UartConnection *connection = (UartConnection *)pvParameters;
+  uart_event_t event;
+  size_t aggregate_len = 0;
+  int64_t last_rx = 0;
 
-                for (int off = 0;
-                     off < aggregate_len;
-                     off += payload)
-                {
-                    int chunk =
-                        MIN(payload,
-                            aggregate_len - off);
-
-                    struct os_mbuf *om =
-                        ble_hs_mbuf_from_flat(
-                            aggregate + off,
-                            chunk);
-
-                    int rc =
-                        ble_gatts_notify_custom(
-                            active_conn,
-                            ble_spp_tx_handle_uart_0,
-                            om);
-
-                    if (rc)
-                    {
-                        os_mbuf_free_chain(om);
-                    }
-                }
-            }
-
-            aggregate_len = 0;
-        }
+  while (1) {
+    if (xQueueReceive(connection->Uart_queue_handle, &event,
+                      pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (event.type == UART_FIFO_OVF) {
+        ESP_LOGW("UART", "rx fifo overflow, data lost");
+      } else if (event.type == UART_BUFFER_FULL) {
+        ESP_LOGW("UART", "rx ring buffer full");
+      }
     }
+
+    /* Drain on every pass: after UART_BUFFER_FULL the driver keeps RX
+     * interrupts off until uart_read_bytes() frees space, so no further
+     * UART_DATA event would ever arrive. */
+    size_t available = 0;
+    uart_get_buffered_data_len(connection->Uart_port, &available);
+
+    while (available > 0) {
+      if (aggregate_len == sizeof(uart_aggregate)) {
+        uart_dispatch(uart_aggregate, aggregate_len);
+        aggregate_len = 0;
+      }
+
+      int len = uart_read_bytes(
+          connection->Uart_port, uart_aggregate + aggregate_len,
+          MIN(available, sizeof(uart_aggregate) - aggregate_len), 0);
+
+      if (len <= 0) {
+        break;
+      }
+
+      aggregate_len += (size_t)len;
+      last_rx = esp_timer_get_time();
+      uart_get_buffered_data_len(connection->Uart_port, &available);
+    }
+
+    if ((aggregate_len == sizeof(uart_aggregate)) ||
+        ((aggregate_len > 0) &&
+         ((esp_timer_get_time() - last_rx) > UART_IDLE_TIMEOUT_US))) {
+      uart_dispatch(uart_aggregate, aggregate_len);
+      aggregate_len = 0;
+    }
+  }
 }
 
 void ble_spp_uart_init(UartConnection *uart_connection_attributes) {
@@ -544,6 +532,7 @@ get_esp32_power_value_based_on_int(int8_t power_configuration) {
 
 void app_main(void) {
   int rc;
+  console_init();
   xTaskCreate(led_task, "uTaskBlink", 2048, NULL, 2, NULL);
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||

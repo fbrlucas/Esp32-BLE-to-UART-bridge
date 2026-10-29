@@ -9,10 +9,10 @@
 
 #define BATTERY_ADC_UNIT ADC_UNIT_1
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_2 /* GPIO2 on the ESP32-C3 */
-#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_6
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
 #define BATTERY_ADC_BITWIDTH ADC_BITWIDTH_DEFAULT
 
-#define BATTERY_UNCAL_FULL_SCALE_MV 1100
+#define BATTERY_UNCAL_FULL_SCALE_MV 2800
 #define BATTERY_UNCAL_FULL_SCALE_RAW 4095
 
 #define BATTERY_TASK_STACK_SIZE 3072
@@ -79,30 +79,33 @@ static uint32_t battery_read_average_mv(void) {
   return (sum / taken) * CONFIG_BATTERY_DIVIDER_RATIO;
 }
 
+static void battery_update(void) {
+  uint32_t millivolts = battery_read_average_mv();
+
+  if (millivolts > 0U) {
+    bool was_low = low_battery;
+
+    battery_mv = millivolts;
+    low_battery = (millivolts < CONFIG_BATTERY_LOW_MV);
+
+    if (low_battery != was_low) {
+      ESP_LOGW(TAG, "battery %s: %u.%03u V", low_battery ? "low" : "recovered",
+               (unsigned)(millivolts / 1000U), (unsigned)(millivolts % 1000U));
+    } else {
+      ESP_LOGI(TAG, "battery %u.%03u V", (unsigned)(millivolts / 1000U),
+               (unsigned)(millivolts % 1000U));
+    }
+  } else {
+    ESP_LOGE(TAG, "no valid ADC sample");
+  }
+}
+
 static void battery_task(void *pvParameters) {
   (void)pvParameters;
 
   while (1) {
-    uint32_t millivolts = battery_read_average_mv();
-
-    if (millivolts > 0U) {
-      bool was_low = low_battery;
-
-      battery_mv = millivolts;
-      low_battery = (millivolts < CONFIG_BATTERY_LOW_MV);
-
-      if (low_battery != was_low) {
-        ESP_LOGW(TAG, "battery %s: %u.%03u V", low_battery ? "low" : "recovered",
-                 (unsigned)(millivolts / 1000U), (unsigned)(millivolts % 1000U));
-      } else {
-        ESP_LOGI(TAG, "battery %u.%03u V", (unsigned)(millivolts / 1000U),
-                 (unsigned)(millivolts % 1000U));
-      }
-    } else {
-      ESP_LOGE(TAG, "no valid ADC sample");
-    }
-
     vTaskDelay(pdMS_TO_TICKS(CONFIG_BATTERY_PERIOD_MS));
+    battery_update();
   }
 }
 
@@ -135,6 +138,7 @@ bool battery_init(void) {
   }
 
   battery_calibration_init();
+  battery_update();
 
   if (xTaskCreate(battery_task, "battTask", BATTERY_TASK_STACK_SIZE, NULL,
                   BATTERY_TASK_PRIORITY, NULL) != pdPASS) {

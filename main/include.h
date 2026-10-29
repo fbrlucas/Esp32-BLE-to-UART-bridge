@@ -17,6 +17,7 @@
 #include "nvs_flash.h"
 #include "task/battery/battery.h"
 #include "task/ble/ble.h"
+#include "task/console/console.h"
 #include "task/led/led.h"
 #include "task/sdcard/sdcard.h"
 /* BLE */

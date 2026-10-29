@@ -6,5 +6,6 @@ endif()
 
 idf_component_register(SRCS "${srcs}" "task/led/led.c" "task/ble/ble.c"
                               "task/sdcard/sdcard.c" "task/battery/battery.c"
+                              "task/console/console.c"
                        INCLUDE_DIRS "." "task/led" "task/ble" "task/sdcard"
-                                    "task/battery")
+                                    "task/battery" "task/console")
