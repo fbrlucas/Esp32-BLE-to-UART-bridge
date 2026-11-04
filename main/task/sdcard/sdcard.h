@@ -11,13 +11,20 @@ extern "C" {
 
 /**
  * Initialises the SPI bus, mounts the SD card and starts the writer task.
- * The log file is created on the first "DD-MM HH:MM:SS" timestamp seen in the
- * UART stream and named DD-MM_HH-MM-SS.TXT (DD-MM_HH-MM-SS_N.TXT when taken).
- * Without a timestamp in the first SDCARD_CHUNK_SIZE bytes or
- * SDCARD_TIMESTAMP_WAIT_US, it falls back to LOGnnn.TXT. When the battery
- * monitor reports low battery, the writer task flushes and closes the file and
- * unmounts the card. Must be called once, after battery_init() and before the
- * UART tasks are started.
+ * Each device boot, delimited by CONFIG_SDCARD_BOOT_MARKER, goes to its own
+ * file named DD-MM_HH-MM-SS.TXT (DD-MM_HH-MM-SS_N.TXT when taken) after the
+ * real time of its first line:
+ *  - first "MM-DD HH:MM:SS" valid: that timestamp is used right away;
+ *  - first timestamp within CONFIG_SDCARD_RTC_UNSET_WINDOW_MIN of 01-01
+ *    00:00:00, or none yet: the file is LOGnnn.TXT until the first
+ *    CONFIG_SDCARD_RTC_SET_MARKER "YYYY/MM/DD HH:MM:SS", then renamed to that
+ *    time minus the device clock elapsed between its first timestamp and the
+ *    last one before the SET.
+ * A file is only opened by a printable ASCII line holding the boot marker or a
+ * timestamp, so RX noise with the device off creates none. Once open, every
+ * byte is written as received. When the battery monitor reports low battery, the writer task flushes and
+ * closes the file and unmounts the card. Must be called once, after
+ * battery_init() and before the UART tasks are started.
  *
  * @return true when a card was mounted and logging is active, false when no
  *         card is present or the battery is already low (the application must
@@ -35,6 +42,14 @@ bool sdcard_is_present(void);
  * @return true when every byte was queued.
  */
 bool sdcard_write(const uint8_t *data, size_t len);
+
+/**
+ * Waits for the writer task to close the log file and unmount the card, which
+ * it does on its own once the battery monitor reports low battery.
+ *
+ * @return true when no card is mounted, also when none ever was.
+ */
+bool sdcard_wait_unmounted(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

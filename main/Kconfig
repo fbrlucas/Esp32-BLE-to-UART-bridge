@@ -12,18 +12,19 @@ config ENABLE_2M_PHY
         Enable 2M PHY for BLE connections
 
 config BLE_TX_POWER_ADV
-    int "BLE TX Power (dBm)"
-    range -12 9
-    default 3
+    int "BLE advertising TX power (dBm)"
+    range -24 18
+    default 0
     help
-        Set BLE advertising transmit power in dBm
+        Transmit power while advertising, in 3 dB steps.
 
 config BLE_TX_POWER_DEFAULT
-    int "BLE TX Power (dBm)"
-    range -12 9
-    default 3
+    int "BLE connection TX power (dBm)"
+    range -24 18
+    default 0
     help
-        Set default BLE transmit power in dBm
+        Transmit power of connections and of any other state without its own
+        setting, in 3 dB steps.
 
 config STATUS_LED_GPIO
     int "Status LED GPIO"
@@ -38,7 +39,9 @@ config LOG_LINE_PREFIX
     help
         Prepended to every ESP_LOG line written to the USB console so the
         firmware's own messages can be told apart from the bytes received on
-        UART0. Bytes from the target are never prefixed.
+        UART0. Bytes from the target are never prefixed. Also starts the
+        status line sent to BLE clients on subscribe, written at the top of
+        every SD log file and to the USB console whenever a terminal opens it.
 
 menu "SD card logger"
 
@@ -47,9 +50,47 @@ config ENABLE_SDCARD
     default y
     help
         Try to mount an SD card at boot. When a card is present every byte
-        received on UART0 is appended to /sdcard/LOGnnn.TXT instead of being
-        notified over BLE. When no card is present the plain BLE-UART bridge
-        flow is kept.
+        received on UART0 is written to the card instead of being notified
+        over BLE, one file per device boot, named DD-MM_HH-MM-SS.TXT after the
+        real time of its first line (LOGnnn.TXT while the device RTC is
+        unknown). When no card is present the plain BLE-UART bridge flow is
+        kept.
+
+config SDCARD_KEEP_BLE
+    bool "Keep BLE running while logging"
+    depends on ENABLE_SDCARD
+    default n
+    help
+        While a card is mounted UART0 data is not notified over BLE, so BLE
+        only serves clients writing to UART0. Disabled, NimBLE is not started
+        when a card is mounted. Enabled, it keeps advertising while logging.
+
+config SDCARD_BOOT_MARKER
+    string "Device boot marker"
+    depends on ENABLE_SDCARD
+    default "SoC Firmware version: "
+    help
+        A line containing this text starts a new log file. It is the first
+        line the device prints after a reset.
+
+config SDCARD_RTC_SET_MARKER
+    string "Device RTC set marker"
+    depends on ENABLE_SDCARD
+    default "RTC SET: "
+    help
+        Text printed by the device right before "YYYY/MM/DD HH:MM:SS" when its
+        RTC is set. The first one in a file with a provisional name renames it
+        to the real time of its first line.
+
+config SDCARD_RTC_UNSET_WINDOW_MIN
+    int "Unset RTC window (minutes)"
+    depends on ENABLE_SDCARD
+    range 1 1440
+    default 30
+    help
+        The device RTC starts at 01-01 00:00:00 after power up. A first
+        timestamp on 01-01 earlier than this many minutes is treated as an
+        unset clock and the file keeps a provisional name until RTC SET.
 
 config SDCARD_PIN_CLK
     int "SD SPI SCK GPIO"
@@ -88,8 +129,8 @@ config ENABLE_BATTERY_MONITOR
     bool "Enable battery voltage monitor"
     default y
     help
-        Sample the battery voltage on GPIO2 (ADC1 channel 2) and blink the
-        status LED while the pack is below the low threshold.
+        Sample the battery voltage on GPIO2 (ADC1 channel 2). Below the low
+        threshold the SD log is closed and the chip enters deep sleep.
 
 config BATTERY_PERIOD_MS
     int "Sampling period (ms)"
@@ -108,6 +149,27 @@ config BATTERY_LOW_MV
     depends on ENABLE_BATTERY_MONITOR
     range 1000 5000
     default 3000
+
+config BATTERY_RESUME_MV
+    int "Resume threshold after a low battery sleep (mV)"
+    depends on ENABLE_BATTERY_MONITOR
+    range 1000 5000
+    default 3400
+    help
+        Once the pack drops below BATTERY_LOW_MV the SD log is closed and the
+        chip enters deep sleep. On each wake up the firmware only resumes
+        when the pack reads above this value, so the voltage rebound of an
+        unloaded cell does not restart logging. Must be above BATTERY_LOW_MV.
+        A reset or power cycle uses BATTERY_LOW_MV instead.
+
+config BATTERY_WAKE_PERIOD_S
+    int "Wake up period during low battery sleep (s)"
+    depends on ENABLE_BATTERY_MONITOR
+    range 0 86400
+    default 30
+    help
+        Deep sleep wake up period used to check whether the pack was
+        recharged. 0 sleeps until a reset.
 
 config BATTERY_DIVIDER_RATIO
     int "External divider ratio"

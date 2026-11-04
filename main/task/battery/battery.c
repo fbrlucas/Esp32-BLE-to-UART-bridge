@@ -4,8 +4,16 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "led.h"
+#include "sdkconfig.h"
+
+#if CONFIG_ENABLE_SDCARD
+#include "sdcard.h"
+#endif
 
 #define BATTERY_ADC_UNIT ADC_UNIT_1
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_2 /* GPIO2 on the ESP32-C3 */
@@ -17,6 +25,10 @@
 
 #define BATTERY_TASK_STACK_SIZE 3072
 #define BATTERY_TASK_PRIORITY 3
+#define BATTERY_SD_CLOSE_TIMEOUT_MS 10000U
+
+_Static_assert(CONFIG_BATTERY_RESUME_MV > CONFIG_BATTERY_LOW_MV,
+               "resume threshold must be above the low threshold");
 
 static const char *TAG = "battery";
 
@@ -24,6 +36,7 @@ static adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle;
 static volatile bool low_battery;
 static volatile uint32_t battery_mv;
+static uint32_t low_threshold_mv = CONFIG_BATTERY_LOW_MV;
 
 static bool battery_calibration_init(void) {
   adc_cali_curve_fitting_config_t cali_config = {
@@ -86,7 +99,7 @@ static void battery_update(void) {
     bool was_low = low_battery;
 
     battery_mv = millivolts;
-    low_battery = (millivolts < CONFIG_BATTERY_LOW_MV);
+    low_battery = (millivolts < low_threshold_mv);
 
     if (low_battery != was_low) {
       ESP_LOGW(TAG, "battery %s: %u.%03u V", low_battery ? "low" : "recovered",
@@ -100,12 +113,35 @@ static void battery_update(void) {
   }
 }
 
+/* Wakes up every CONFIG_BATTERY_WAKE_PERIOD_S to check whether the pack was
+ * recharged, otherwise only a reset brings the firmware back. */
+static void battery_deep_sleep(void) {
+  ESP_LOGW(TAG, "entering deep sleep");
+
+#if CONFIG_BATTERY_WAKE_PERIOD_S > 0
+  esp_sleep_enable_timer_wakeup((uint64_t)CONFIG_BATTERY_WAKE_PERIOD_S *
+                                1000000ULL);
+#endif
+
+  led_hold_off();
+  esp_deep_sleep_start();
+}
+
 static void battery_task(void *pvParameters) {
   (void)pvParameters;
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(CONFIG_BATTERY_PERIOD_MS));
     battery_update();
+
+    if (low_battery) {
+#if CONFIG_ENABLE_SDCARD
+      if (!sdcard_wait_unmounted(BATTERY_SD_CLOSE_TIMEOUT_MS)) {
+        ESP_LOGE(TAG, "SD card still mounted, sleeping anyway");
+      }
+#endif
+      battery_deep_sleep();
+    }
   }
 }
 
@@ -138,7 +174,25 @@ bool battery_init(void) {
   }
 
   battery_calibration_init();
+
+  /* The pack recovers some voltage once unloaded, so after a low battery
+   * sleep only a recharge, not that rebound, resumes logging. */
+  if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+    low_threshold_mv = CONFIG_BATTERY_RESUME_MV;
+  }
+
   battery_update();
+  low_threshold_mv = CONFIG_BATTERY_LOW_MV;
+
+  if (low_battery) {
+    battery_deep_sleep();
+  }
+
+  /* A low reading at boot is already reported by battery_update(). */
+  if ((battery_mv > 0U) && !low_battery) {
+    ESP_LOGW(TAG, "battery at boot: %u.%03u V", (unsigned)(battery_mv / 1000U),
+             (unsigned)(battery_mv % 1000U));
+  }
 
   if (xTaskCreate(battery_task, "battTask", BATTERY_TASK_STACK_SIZE, NULL,
                   BATTERY_TASK_PRIORITY, NULL) != pdPASS) {

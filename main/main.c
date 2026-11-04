@@ -17,6 +17,7 @@
 #include <string.h>
 
 static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg);
+static void ble_notify_uart0(const uint8_t *data, size_t len);
 static uint8_t own_addr_type;
 int gatt_svr_register(void);
 
@@ -108,6 +109,8 @@ static void ble_spp_server_advertise(void) {
   memset(&adv_params, 0, sizeof adv_params);
   adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
   adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+  adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(BLE_ADV_ITVL_MIN_MS);
+  adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(BLE_ADV_ITVL_MAX_MS);
   rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
                          ble_spp_server_gap_event, NULL);
   if (rc != 0) {
@@ -138,17 +141,22 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg) {
 
   case BLE_GAP_EVENT_CONNECT:
     active_conn = event->connect.conn_handle;
-#ifdef CONFIG_ENABLE_2M_PHY
     if (event->connect.status == 0) {
+#ifdef CONFIG_ENABLE_2M_PHY
       ble_gap_set_prefered_le_phy(event->connect.conn_handle,
                                   BLE_GAP_LE_PHY_2M_MASK,
                                   BLE_GAP_LE_PHY_2M_MASK, 0);
-    }
 #endif
-    struct ble_gap_upd_params params = {.itvl_min = 6, // 7.5 ms
-                                        .itvl_max = 6, // 15 ms
-                                        .latency = 0,
-                                        .supervision_timeout = 200};
+      ble_gap_set_data_len(event->connect.conn_handle,
+                           BLE_HCI_SET_DATALEN_TX_OCTETS_MAX,
+                           BLE_HCI_SET_DATALEN_TX_TIME_MAX);
+    }
+    struct ble_gap_upd_params params = {
+        .itvl_min = BLE_GAP_CONN_ITVL_MS(BLE_CONN_ITVL_MIN_MS),
+        .itvl_max = BLE_GAP_CONN_ITVL_MS(BLE_CONN_ITVL_MAX_MS),
+        .latency = BLE_CONN_LATENCY,
+        .supervision_timeout =
+            BLE_GAP_SUPERVISION_TIMEOUT_MS(BLE_CONN_SUPERVISION_TIMEOUT_MS)};
     ble_gap_update_params(active_conn, &params);
     return 0;
   case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
@@ -221,6 +229,15 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg) {
 
     if (event->subscribe.attr_handle == ble_spp_tx_handle_uart_0) {
       uart0_notify = event->subscribe.cur_notify;
+
+      /* Notifications sent before the client subscribes are dropped, so the
+       * status line goes out here rather than on BLE_GAP_EVENT_CONNECT. */
+      if (event->subscribe.cur_notify && !event->subscribe.prev_notify) {
+        char status[CONSOLE_STATUS_SIZE];
+        size_t len = console_format_status(status, sizeof(status));
+
+        ble_notify_uart0((const uint8_t *)status, len);
+      }
     }
     return 0;
 
@@ -475,7 +492,7 @@ void ble_spp_uart_init(UartConnection *uart_connection_attributes) {
       .stop_bits = UART_STOP_BITS_1,
       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
       .rx_flow_ctrl_thresh = 122,
-      .source_clk = UART_SCLK_DEFAULT,
+      .source_clk = UART_SCLK_XTAL,
   };
   uart_set_rx_timeout(uart_connection_attributes->Uart_port, 1);
   uart_driver_install(uart_connection_attributes->Uart_port, 16384, 16384, 20,
@@ -493,41 +510,14 @@ void ble_spp_uart_init(UartConnection *uart_connection_attributes) {
               (void *)uart_connection_attributes, 10, NULL);
 }
 
-esp_power_level_t
-get_esp32_power_value_based_on_int(int8_t power_configuration) {
+_Static_assert((CONFIG_BLE_TX_POWER_ADV % 3) == 0,
+               "BLE advertising TX power must be a multiple of 3 dBm");
+_Static_assert((CONFIG_BLE_TX_POWER_DEFAULT % 3) == 0,
+               "BLE connection TX power must be a multiple of 3 dBm");
 
-  esp_power_level_t power;
-
-  switch (power_configuration) {
-  case 9:
-    power = ESP_PWR_LVL_P12;
-    break;
-  case 7:
-    power = ESP_PWR_LVL_P9;
-    break;
-  case 5:
-    power = ESP_PWR_LVL_P6;
-    break;
-  case 3:
-    power = ESP_PWR_LVL_P3;
-    break;
-  case 0:
-    power = ESP_PWR_LVL_N0;
-    break;
-  case -2:
-    power = ESP_PWR_LVL_N3;
-    break;
-  case -6:
-    power = ESP_PWR_LVL_N6;
-    break;
-  case -12:
-    power = ESP_PWR_LVL_N12;
-    break;
-  default:
-    power = ESP_PWR_LVL_P3;
-    break;
-  }
-  return power;
+/* Controller levels are 3 dB apart, ESP_PWR_LVL_N0 being 0 dBm. */
+static esp_power_level_t ble_tx_power_level(int dbm) {
+  return (esp_power_level_t)((int)ESP_PWR_LVL_N0 + (dbm / 3));
 }
 
 void app_main(void) {
@@ -552,9 +542,26 @@ void app_main(void) {
   battery_init();
 #endif
 
+  console_start_status_monitor();
+
+  bool logging = false;
+
 #if CONFIG_ENABLE_SDCARD
-  if (sdcard_init()) {
+  logging = sdcard_init();
+
+  if (logging) {
     MODLOG_DFLT(INFO, "SD card detected, UART0 data is logged to file\n");
+  }
+#endif
+
+  uart0_notify = false;
+
+  ble_spp_uart_init(&Port0);
+
+#if !CONFIG_SDCARD_KEEP_BLE
+  if (logging) {
+    ESP_LOGW("BLE", "logging to SD card, BLE not started");
+    return;
   }
 #endif
 
@@ -564,9 +571,15 @@ void app_main(void) {
     return;
   }
 
-  uart0_notify = false;
-
-  ble_spp_uart_init(&Port0);
+  /* Set before the host task starts advertising. */
+  if ((esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,
+                            ble_tx_power_level(CONFIG_BLE_TX_POWER_ADV)) !=
+       ESP_OK) ||
+      (esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT,
+                            ble_tx_power_level(CONFIG_BLE_TX_POWER_DEFAULT)) !=
+       ESP_OK)) {
+    ESP_LOGW("BLE", "unable to set TX power");
+  }
 
   ble_hs_cfg.reset_cb = ble_spp_server_on_reset;
   ble_hs_cfg.sync_cb = ble_spp_server_on_sync;
@@ -597,10 +610,4 @@ void app_main(void) {
   ble_store_config_init();
   nimble_port_freertos_init(ble_spp_server_host_task);
   ble_att_set_preferred_mtu(BLE_PREFERRED_MTU);
-  esp_power_level_t default_power =
-      get_esp32_power_value_based_on_int(CONFIG_BLE_TX_POWER_ADV);
-  esp_power_level_t advertise_power =
-      get_esp32_power_value_based_on_int(CONFIG_BLE_TX_POWER_DEFAULT);
-  esp_ble_tx_power_set(advertise_power, BLE_DEFAULT_POWER);
-  esp_ble_tx_power_set(default_power, BLE_ADVERTISING_POWER);
 }
