@@ -56,14 +56,16 @@ BLE write 0xABE1 ──► UART0 TX ──► target RX
 ## SD card logging
 
 - **One file per target boot.** A line containing `SDCARD_BOOT_MARKER` (default `SoC Firmware version: `) closes the current file and starts a new one. Bytes on that line before the marker go to the previous file.
-- **File names:** `DD-MM_HH-MM-SS.TXT`, taken from the first `MM-DD HH:MM:SS` timestamp the target prints. If the name is taken, a `_N` suffix is added.
-- **Target RTC not set yet:** the target clock starts at 01-01 00:00:00 after power up. A first timestamp on 01-01 within `SDCARD_RTC_UNSET_WINDOW_MIN` minutes of midnight is treated as an unset clock. The file is then created as `LOGnnn.TXT`. At the first `RTC SET: YYYY/MM/DD HH:MM:SS` line it is renamed to the real start time: the set time minus the target clock time elapsed since the file's first timestamp.
-- **Line noise:** a file is only opened by a printable ASCII line that contains the boot marker or a timestamp. The garbage RX sees while the target is off or powering up therefore creates no files. Once a file is open, every byte is written as received.
+- **Timestamps:** the target starts its lines with `TAG HH:MM:SS ` (three upper case letters or digits). It prints the date as a `---- YYYY-MM-DD ----` line at boot, at midnight and when its RTC is set. A line's time is dated with the last date line.
+- **File names:** `DD-MM_HH-MM-SS.TXT`, taken from the first time in the file. If the name is taken, a `_N` suffix is added.
+- **Target RTC not set yet:** the target clock starts at 01-01 00:00:00 after power up. A first time dated 01-01 within `SDCARD_RTC_UNSET_WINDOW_MIN` minutes of midnight is treated as an unset clock. The file is then created as `LOGnnn.TXT`. At the first `RTC SET: YYYY/MM/DD HH:MM:SS` line it is renamed to the real start time: the set time minus the target clock time elapsed since the file's first time.
+- **Logger started mid-boot:** when the logger boots while the target is already running, for example after a terminal reset it (see [USB console](#usb-console)), the first line with a time or a date opens a file. Until a date line arrives, the time has no date, so the file is `LOGnnn.TXT`. It is renamed at the first dated time, or at `RTC SET` if that comes first, using the same elapsed time rule.
+- **Line noise:** a file is only opened by a printable ASCII line that contains the boot marker, a date or a time. The garbage RX sees while the target is off or powering up therefore creates no files. Dropped bytes are reported once when dropping starts and once, as a total, when the next file opens. Once a file is open, every byte is written as received.
 - **File header:** every file starts with the [status line](#status-line).
 - **Flushing:** data passes through a 4 KB stdio buffer and is `fflush`ed and `fsync`ed every 30 s.
 - **Overflow:** if the writer falls more than 100 ms behind, incoming bytes are dropped and a warning is logged.
 
-The boot marker, the RTC set marker and the timestamp format all match a specific target firmware. Change them in menuconfig to suit yours.
+The boot marker, the RTC set marker and the date and time layouts all match a specific target firmware. The markers are menuconfig options. The layouts are `SDCARD_TIME_LAYOUT` and `SDCARD_DATE_LAYOUT` in [sdcard.c](main/task/sdcard/sdcard.c).
 
 ## BLE bridge
 
@@ -84,6 +86,8 @@ The logger advertises as `UART-to-BLE-Bridge` and includes service UUID16 `0xABE
 The console runs on the C3's built-in USB Serial/JTAG. It shows the UART0 bytes unchanged, and it shows the firmware's own log lines prefixed with `LOG_LINE_PREFIX` (default `[ESP] `). A log line always starts on a new line, even in the middle of a data burst. The default log level is WARN.
 
 The status line is printed each time a terminal opens the port. The C3 USB Serial/JTAG does not expose DTR/RTS, so the firmware infers an open port from the host polling the CDC data endpoint.
+
+Opening the port can reset the logger. The C3 USB Serial/JTAG resets the chip when the host drives RTS, the same way esptool does. `idf.py monitor` does this on purpose (use `--no-reset`), and terminals that apply initial line states on connect can do it too. In CoolTerm, set DTR and RTS to off. Unlike the C6 or H2, the C3 has no register bit to disable this reset. The reset reason is logged at boot, and a USB reset shows as `reset reason: USB`.
 
 ## Status line
 

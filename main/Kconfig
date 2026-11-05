@@ -89,7 +89,7 @@ config SDCARD_RTC_UNSET_WINDOW_MIN
     default 30
     help
         The device RTC starts at 01-01 00:00:00 after power up. A first
-        timestamp on 01-01 earlier than this many minutes is treated as an
+        time dated 01-01 and earlier than this many minutes is treated as an
         unset clock and the file keeps a provisional name until RTC SET.
 
 config SDCARD_PIN_CLK

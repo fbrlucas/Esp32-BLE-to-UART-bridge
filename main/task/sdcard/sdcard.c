@@ -29,8 +29,10 @@
 #define SDCARD_RECEIVE_TIMEOUT_MS 200U
 #define SDCARD_ENQUEUE_TIMEOUT_MS 100U
 #define SDCARD_FLUSH_PERIOD_US 30000000
-#define SDCARD_TIMESTAMP_LAYOUT "00-00 00:00:00"
+#define SDCARD_TIME_LAYOUT "AAA 00:00:00 "
+#define SDCARD_DATE_LAYOUT "---- 0000-00-00 ----"
 #define SDCARD_RTC_SET_LAYOUT "0000/00/00 00:00:00"
+#define SDCARD_SECONDS_PER_DAY 86400U
 #define SDCARD_NAME_SIZE 32U
 #define SDCARD_PATH_SIZE 64U
 #define SDCARD_MAX_OPEN_FILES 3
@@ -39,8 +41,9 @@
 #define SDCARD_TASK_PRIORITY 9
 
 typedef struct {
-  unsigned day;
+  unsigned year;
   unsigned month;
+  unsigned day;
   unsigned hour;
   unsigned minute;
   unsigned second;
@@ -61,10 +64,14 @@ static char stdio_buffer[SDCARD_STDIO_BUFFER_SIZE];
 static char line[SDCARD_LINE_SIZE];
 static size_t line_len;
 static char log_path[SDCARD_PATH_SIZE];
-static uint32_t first_stamp_s;
-static uint32_t last_stamp_s;
+static sdcard_stamp_t device_date;
+static bool date_known;
+static uint32_t last_time_s;
+static uint32_t elapsed_s;
 static bool stamp_seen;
+static bool date_pending;
 static bool name_final;
+static size_t dropped_bytes;
 static volatile bool card_present;
 
 static bool sdcard_handle_line(void);
@@ -173,15 +180,29 @@ static void sdcard_line_skip(size_t count) {
 
 static bool sdcard_is_digit(char c) { return (c >= '0') && (c <= '9'); }
 
+static bool sdcard_is_tag(char c) {
+  return ((c >= 'A') && (c <= 'Z')) || sdcard_is_digit(c);
+}
+
 static unsigned sdcard_two_digits(const char *p) {
   return ((unsigned)(p[0] - '0') * 10U) + (unsigned)(p[1] - '0');
 }
 
-/* '0' in the layout matches any digit, other characters match literally. The
- * text must be NUL terminated. */
+/* '0' in the layout matches any digit, 'A' an upper case letter or a digit,
+ * other characters match literally. The text must be NUL terminated. */
 static bool sdcard_match_layout(const char *p, const char *layout) {
   for (size_t k = 0U; layout[k] != '\0'; k++) {
-    if (!((layout[k] == '0') ? sdcard_is_digit(p[k]) : (p[k] == layout[k]))) {
+    bool match;
+
+    if (layout[k] == '0') {
+      match = sdcard_is_digit(p[k]);
+    } else if (layout[k] == 'A') {
+      match = sdcard_is_tag(p[k]);
+    } else {
+      match = (p[k] == layout[k]);
+    }
+
+    if (!match) {
       return false;
     }
   }
@@ -189,10 +210,28 @@ static bool sdcard_match_layout(const char *p, const char *layout) {
   return true;
 }
 
-static bool sdcard_stamp_in_range(const sdcard_stamp_t *stamp) {
+static bool sdcard_date_in_range(const sdcard_stamp_t *stamp) {
   return (stamp->day >= 1U) && (stamp->day <= 31U) && (stamp->month >= 1U) &&
-         (stamp->month <= 12U) && (stamp->hour <= 23U) &&
-         (stamp->minute <= 59U) && (stamp->second <= 59U);
+         (stamp->month <= 12U);
+}
+
+static bool sdcard_time_in_range(const sdcard_stamp_t *stamp) {
+  return (stamp->hour <= 23U) && (stamp->minute <= 59U) &&
+         (stamp->second <= 59U);
+}
+
+/* "YYYY-MM-DD", any separator. */
+static void sdcard_parse_date(const char *p, sdcard_stamp_t *stamp) {
+  stamp->year = (sdcard_two_digits(&p[0]) * 100U) + sdcard_two_digits(&p[2]);
+  stamp->month = sdcard_two_digits(&p[5]);
+  stamp->day = sdcard_two_digits(&p[8]);
+}
+
+/* "HH:MM:SS" */
+static void sdcard_parse_time(const char *p, sdcard_stamp_t *stamp) {
+  stamp->hour = sdcard_two_digits(&p[0]);
+  stamp->minute = sdcard_two_digits(&p[3]);
+  stamp->second = sdcard_two_digits(&p[6]);
 }
 
 static bool sdcard_stamp_is_unset(const sdcard_stamp_t *stamp) {
@@ -201,43 +240,55 @@ static bool sdcard_stamp_is_unset(const sdcard_stamp_t *stamp) {
           (unsigned)CONFIG_SDCARD_RTC_UNSET_WINDOW_MIN);
 }
 
-/* Seconds since 01-01 00:00:00 of a non leap year, where the device clock
- * starts while its RTC is unset. */
-static uint32_t sdcard_stamp_seconds(const sdcard_stamp_t *stamp) {
-  static const uint16_t days_before[12] = {0U,   31U,  59U,  90U,
-                                           120U, 151U, 181U, 212U,
-                                           243U, 273U, 304U, 334U};
-  uint32_t days = (uint32_t)days_before[stamp->month - 1U] + stamp->day - 1U;
-
-  return (days * 86400U) + (stamp->hour * 3600U) + (stamp->minute * 60U) +
-         stamp->second;
+static uint32_t sdcard_time_seconds(const sdcard_stamp_t *stamp) {
+  return (stamp->hour * 3600U) + (stamp->minute * 60U) + stamp->second;
 }
 
-/* Matches the device's "MM-DD HH:MM:SS" not preceded by a digit. */
-static bool sdcard_find_timestamp(sdcard_stamp_t *stamp) {
+/* Matches the device's "---- YYYY-MM-DD ----", printed at boot, at midnight
+ * and when its RTC is set. */
+static bool sdcard_find_date(sdcard_stamp_t *date) {
   for (size_t i = 0U; i < line_len; i++) {
-    const char *p = &line[i];
+    sdcard_stamp_t found = {0};
 
-    if (((i > 0U) && sdcard_is_digit(p[-1])) ||
-        !sdcard_match_layout(p, SDCARD_TIMESTAMP_LAYOUT)) {
+    if (!sdcard_match_layout(&line[i], SDCARD_DATE_LAYOUT)) {
       continue;
     }
 
-    sdcard_stamp_t found = {
-        .day = sdcard_two_digits(&p[3]),
-        .month = sdcard_two_digits(&p[0]),
-        .hour = sdcard_two_digits(&p[6]),
-        .minute = sdcard_two_digits(&p[9]),
-        .second = sdcard_two_digits(&p[12]),
-    };
+    sdcard_parse_date(&line[i + 5U], &found);
 
-    if (sdcard_stamp_in_range(&found)) {
-      *stamp = found;
+    if (sdcard_date_in_range(&found)) {
+      *date = found;
       return true;
     }
   }
 
   return false;
+}
+
+/* Matches the device's "TAG HH:MM:SS " at the start of the line, dated with
+ * the last date line. */
+static bool sdcard_find_time(sdcard_stamp_t *stamp) {
+  if (!sdcard_match_layout(line, SDCARD_TIME_LAYOUT)) {
+    return false;
+  }
+
+  *stamp = device_date;
+  sdcard_parse_time(&line[4], stamp);
+  return sdcard_time_in_range(stamp);
+}
+
+static time_t sdcard_stamp_to_time(const sdcard_stamp_t *stamp) {
+  struct tm fields = {
+      .tm_year = (int)stamp->year - 1900,
+      .tm_mon = (int)stamp->month - 1,
+      .tm_mday = (int)stamp->day,
+      .tm_hour = (int)stamp->hour,
+      .tm_min = (int)stamp->minute,
+      .tm_sec = (int)stamp->second,
+      .tm_isdst = 0,
+  };
+
+  return mktime(&fields);
 }
 
 /* Matches CONFIG_SDCARD_RTC_SET_MARKER followed by "YYYY/MM/DD HH:MM:SS". */
@@ -254,31 +305,16 @@ static bool sdcard_find_rtc_set(time_t *set_time) {
     return false;
   }
 
-  sdcard_stamp_t found = {
-      .day = sdcard_two_digits(&p[8]),
-      .month = sdcard_two_digits(&p[5]),
-      .hour = sdcard_two_digits(&p[11]),
-      .minute = sdcard_two_digits(&p[14]),
-      .second = sdcard_two_digits(&p[17]),
-  };
+  sdcard_stamp_t found = {0};
 
-  if (!sdcard_stamp_in_range(&found)) {
+  sdcard_parse_date(p, &found);
+  sdcard_parse_time(&p[11], &found);
+
+  if (!sdcard_date_in_range(&found) || !sdcard_time_in_range(&found)) {
     return false;
   }
 
-  struct tm fields = {
-      .tm_year = (int)((sdcard_two_digits(&p[0]) * 100U) +
-                       sdcard_two_digits(&p[2])) -
-                 1900,
-      .tm_mon = (int)found.month - 1,
-      .tm_mday = (int)found.day,
-      .tm_hour = (int)found.hour,
-      .tm_min = (int)found.minute,
-      .tm_sec = (int)found.second,
-      .tm_isdst = 0,
-  };
-
-  *set_time = mktime(&fields);
+  *set_time = sdcard_stamp_to_time(&found);
   return *set_time != (time_t)-1;
 }
 
@@ -286,6 +322,7 @@ static void sdcard_stamp_from_time(time_t t, sdcard_stamp_t *stamp) {
   struct tm fields;
 
   localtime_r(&t, &fields);
+  stamp->year = (unsigned)fields.tm_year + 1900U;
   stamp->day = (unsigned)fields.tm_mday;
   stamp->month = (unsigned)fields.tm_mon + 1U;
   stamp->hour = (unsigned)fields.tm_hour;
@@ -354,8 +391,10 @@ static bool sdcard_open_session(const char *name) {
   }
 
   stamp_seen = false;
+  date_pending = false;
+  elapsed_s = 0U;
   name_final = (name != NULL);
-  ESP_LOGI(TAG, "logging UART0 data to %s", log_path);
+  ESP_LOGW(TAG, "logging UART0 data to %s", log_path);
   return true;
 }
 
@@ -365,7 +404,7 @@ static void sdcard_close_session(void) {
   }
 
   log_file = NULL;
-  ESP_LOGI(TAG, "device reboot, closed %s", log_path);
+  ESP_LOGW(TAG, "device reboot, closed %s", log_path);
 }
 
 /* FATFS cannot rename an open file. */
@@ -383,7 +422,7 @@ static bool sdcard_rename_session(const char *name) {
 
   if (sdcard_free_path(name, path, sizeof(path)) &&
       (rename(log_path, path) == 0)) {
-    ESP_LOGI(TAG, "renamed %s to %s", log_path, path);
+    ESP_LOGW(TAG, "renamed %s to %s", log_path, path);
     memcpy(log_path, path, sizeof(log_path));
   } else {
     ESP_LOGW(TAG, "unable to rename %s", log_path);
@@ -392,13 +431,14 @@ static bool sdcard_rename_session(const char *name) {
   return sdcard_fopen("a");
 }
 
-/* Only a printable ASCII line holding the boot marker or a timestamp opens a
+/* Only a printable ASCII line holding the boot marker, a date or a time opens a
  * file. What comes before it, RX noise while the device powers up included,
- * has no file to go to. */
-static bool sdcard_try_open(bool is_boot) {
-  sdcard_stamp_t stamp;
+ * has no file to go to and is reported once the file opens. */
+static bool sdcard_try_open(bool is_boot, bool has_date) {
+  sdcard_stamp_t stamp = {0};
   char name[SDCARD_NAME_SIZE];
   size_t skip = 0U;
+  bool first_drop = (dropped_bytes == 0U);
 
   if (is_boot) {
     skip = (size_t)(sdcard_line_find(CONFIG_SDCARD_BOOT_MARKER) - line);
@@ -410,23 +450,30 @@ static bool sdcard_try_open(bool is_boot) {
 
   sdcard_line_skip(skip);
 
-  bool has_stamp = sdcard_find_timestamp(&stamp);
+  bool has_time = sdcard_find_time(&stamp);
 
-  if ((!is_boot && !has_stamp) || !sdcard_line_is_text()) {
+  if ((!is_boot && !has_date && !has_time) || !sdcard_line_is_text()) {
     skip += line_len;
     line_len = 0U;
   }
 
-  if (skip > 0U) {
-    ESP_LOGW(TAG, "dropped %u bytes before the first device message",
-             (unsigned)skip);
-  }
+  dropped_bytes += skip;
 
   if (line_len == 0U) {
+    if (first_drop) {
+      ESP_LOGW(TAG, "no device message yet, dropping UART0 data");
+    }
+
     return true;
   }
 
-  bool stamp_valid = has_stamp && !sdcard_stamp_is_unset(&stamp);
+  if (dropped_bytes > 0U) {
+    ESP_LOGW(TAG, "dropped %u bytes before the first device message",
+             (unsigned)dropped_bytes);
+    dropped_bytes = 0U;
+  }
+
+  bool stamp_valid = has_time && date_known && !sdcard_stamp_is_unset(&stamp);
 
   if (stamp_valid) {
     sdcard_format_name(&stamp, name, sizeof(name));
@@ -436,27 +483,43 @@ static bool sdcard_try_open(bool is_boot) {
 }
 
 /* Every file holds one device boot and is named after the real time of its
- * first line. While the device RTC is unset that time is unknown, so the file
- * stays LOGnnn.TXT until RTC SET arrives and the start time is derived from
- * the device clock elapsed until then. Once a file is open every byte is
- * written as received. */
+ * first line, the "TAG HH:MM:SS" dated by the last date line. While that time
+ * is unknown the file stays LOGnnn.TXT:
+ *  - device RTC unset: renamed at RTC SET;
+ *  - date missing, the logger having started after the device booted: renamed
+ *    at the first dated time, or at RTC SET when that comes first.
+ * The start time is then derived from the device clock elapsed since the
+ * file's first time. Once a file is open every byte is written as received. */
 static bool sdcard_handle_line(void) {
   const char *marker = sdcard_line_find(CONFIG_SDCARD_BOOT_MARKER);
   bool is_boot = (marker != NULL);
 
-  if (is_boot && (log_file != NULL)) {
-    size_t head = (size_t)(marker - line);
+  if (is_boot) {
+    if (log_file != NULL) {
+      size_t head = (size_t)(marker - line);
 
-    /* What precedes the marker ends the previous boot. */
-    if (!sdcard_fwrite(line, head)) {
-      return false;
+      /* What precedes the marker ends the previous boot. */
+      if (!sdcard_fwrite(line, head)) {
+        return false;
+      }
+
+      sdcard_close_session();
+      sdcard_line_skip(head);
     }
 
-    sdcard_close_session();
-    sdcard_line_skip(head);
+    /* The device prints its date again right after booting. */
+    date_known = false;
   }
 
-  if ((log_file == NULL) && !sdcard_try_open(is_boot)) {
+  sdcard_stamp_t date = {0};
+  bool has_date = sdcard_find_date(&date);
+
+  if (has_date) {
+    device_date = date;
+    date_known = true;
+  }
+
+  if ((log_file == NULL) && !sdcard_try_open(is_boot, has_date)) {
     return false;
   }
 
@@ -465,30 +528,39 @@ static bool sdcard_handle_line(void) {
   }
 
   sdcard_stamp_t stamp = {0};
-  bool has_stamp = sdcard_find_timestamp(&stamp);
-  bool stamp_valid = has_stamp && !sdcard_stamp_is_unset(&stamp);
-  uint32_t stamp_s = has_stamp ? sdcard_stamp_seconds(&stamp) : 0U;
+  bool has_time = sdcard_find_time(&stamp);
+  bool stamp_valid = has_time && date_known && !sdcard_stamp_is_unset(&stamp);
+  uint32_t time_s = has_time ? sdcard_time_seconds(&stamp) : 0U;
+  uint32_t line_elapsed_s = elapsed_s;
+
+  /* The device clock wraps at midnight. */
+  if (has_time && stamp_seen) {
+    line_elapsed_s += (time_s + SDCARD_SECONDS_PER_DAY - last_time_s) %
+                      SDCARD_SECONDS_PER_DAY;
+  }
 
   if (!name_final) {
-    const sdcard_stamp_t *start = (stamp_valid && !stamp_seen) ? &stamp : NULL;
-    sdcard_stamp_t derived;
+    time_t start_time = (time_t)-1;
     time_t set_time;
 
     if (sdcard_find_rtc_set(&set_time)) {
       /* The device may print this line with its old clock or the new one. */
-      uint32_t set_s = (has_stamp && !stamp_valid) ? stamp_s : last_stamp_s;
-      time_t elapsed = (stamp_seen && (set_s > first_stamp_s))
-                           ? (time_t)(set_s - first_stamp_s)
-                           : 0;
+      start_time =
+          set_time - (time_t)(stamp_valid ? elapsed_s : line_elapsed_s);
+    } else if (stamp_valid && (!stamp_seen || date_pending)) {
+      time_t stamp_time = sdcard_stamp_to_time(&stamp);
 
-      sdcard_stamp_from_time(set_time - elapsed, &derived);
-      start = &derived;
+      if (stamp_time != (time_t)-1) {
+        start_time = stamp_time - (time_t)line_elapsed_s;
+      }
     }
 
-    if (start != NULL) {
+    if (start_time != (time_t)-1) {
+      sdcard_stamp_t start;
       char name[SDCARD_NAME_SIZE];
 
-      sdcard_format_name(start, name, sizeof(name));
+      sdcard_stamp_from_time(start_time, &start);
+      sdcard_format_name(&start, name, sizeof(name));
 
       if (!sdcard_rename_session(name)) {
         return false;
@@ -496,12 +568,13 @@ static bool sdcard_handle_line(void) {
     }
   }
 
-  if (has_stamp) {
+  if (has_time) {
     if (!stamp_seen) {
-      first_stamp_s = stamp_s;
+      date_pending = !date_known;
     }
 
-    last_stamp_s = stamp_s;
+    elapsed_s = line_elapsed_s;
+    last_time_s = time_s;
     stamp_seen = true;
   }
 

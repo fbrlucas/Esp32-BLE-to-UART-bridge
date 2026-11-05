@@ -1,6 +1,7 @@
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_bt.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
@@ -520,9 +521,36 @@ static esp_power_level_t ble_tx_power_level(int dbm) {
   return (esp_power_level_t)((int)ESP_PWR_LVL_N0 + (dbm / 3));
 }
 
+static const char *reset_reason_name(esp_reset_reason_t reason) {
+  switch (reason) {
+  case ESP_RST_POWERON:
+    return "power on";
+  case ESP_RST_SW:
+    return "software";
+  case ESP_RST_PANIC:
+    return "panic";
+  case ESP_RST_INT_WDT:
+    return "interrupt watchdog";
+  case ESP_RST_TASK_WDT:
+    return "task watchdog";
+  case ESP_RST_WDT:
+    return "watchdog";
+  case ESP_RST_DEEPSLEEP:
+    return "deep sleep wake up";
+  case ESP_RST_BROWNOUT:
+    return "brownout";
+  /* Raised by a host driving RTS on the USB Serial/JTAG port. */
+  case ESP_RST_USB:
+    return "USB";
+  default:
+    return "unknown";
+  }
+}
+
 void app_main(void) {
   int rc;
   console_init();
+  ESP_LOGW("boot", "reset reason: %s", reset_reason_name(esp_reset_reason()));
   xTaskCreate(led_task, "uTaskBlink", 2048, NULL, 2, NULL);
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
