@@ -14,7 +14,7 @@ The mode is chosen once, at boot:
 
 | SD card at boot | UART0 RX goes to | BLE |
 |---|---|---|
-| Mounted | SD card and USB console | Off by default. With `SDCARD_KEEP_BLE` it keeps advertising, but only BLE → UART0 TX is used |
+| Mounted | SD card and USB console | Non-connectable battery beacon by default (see [Checking a running logger](#checking-a-running-logger)). With `SDCARD_KEEP_BLE` it is connectable, but only BLE → UART0 TX is used. With both options off, NimBLE is not started |
 | Absent, mount failed or battery low | BLE notifications and USB console | Advertising, one connection at a time |
 
 The firmware only checks for a card at boot, so a card inserted later is not used until the next reset. If power is cut or the card is pulled while logging, up to the last 30 s of data are lost (see [SD card logging](#sd-card-logging)).
@@ -53,6 +53,21 @@ target TX ──► UART0 RX (16 KB ring) ──► UART task, 2 KB aggregate, s
 BLE write 0xABE1 ──► UART0 TX ──► target RX
 ```
 
+## Checking a running logger
+
+The state and battery can be read without stopping the logger or removing the card, from any BLE scanner app such as nRF Connect:
+
+| State | BLE scan |
+|---|---|
+| Logging to SD | `UART-Logger 3.91V` |
+| Logging stopped on a card error | `UART-SD-Fail 3.91V` |
+| No card at boot, bridge mode | `UART-to-BLE-Bridge` |
+| Low battery sleep, no power or out of range | Nothing |
+
+The name carries the last battery reading and is refreshed every 60 s, so a card error can also take up to 60 s to show. While logging, the advertising is `ADV_NONCONN_IND`, so there is no scan response, no connection and no way to write to the target. Set `SDCARD_BLE_BEACON=n` to keep NimBLE off while logging.
+
+When the scan shows nothing, the status LED tells a low battery sleep, with its one flash per wake-up period, from a logger without power.
+
 ## SD card logging
 
 - **One file per target boot.** A line containing `SDCARD_BOOT_MARKER` (default `SoC Firmware version: `) closes the current file and starts a new one. Bytes on that line before the marker go to the previous file.
@@ -69,12 +84,13 @@ The boot marker, the RTC set marker and the date and time layouts all match a sp
 
 ## BLE bridge
 
-The logger advertises as `UART-to-BLE-Bridge` and includes service UUID16 `0xABE0` in the advertisement.
+In bridge mode the logger advertises as `UART-to-BLE-Bridge`. Service UUID16 `0xABE0` is in the advertisement in every mode.
 
 | Characteristic | Properties | Data |
 |---|---|---|
 | `0xABE1` | Write, Write Without Response | client → UART0 TX |
 | `0xABE2` | Notify | UART0 RX → client |
+| `0xABE4` | Read | Last battery reading in volts as ASCII, e.g. `3.912`, or `n/a` when no reading is available. Up to `BATTERY_PERIOD_MS` old |
 
 - **Connections:** one at a time. No pairing or encryption.
 - **Link settings:** the logger asks for an ATT MTU of 517, a 251 byte data length and, when `ENABLE_2M_PHY` is set, the 2M PHY. Notifications are split into chunks of MTU − 3 bytes.
@@ -92,7 +108,7 @@ Opening the port can reset the logger. The C3 USB Serial/JTAG resets the chip wh
 ## Status line
 
 ```text
-[ESP] battery 3.912 V, firmware 1.0.0
+[ESP] battery 3.912 V, firmware 1.0.1
 ```
 
 The logger emits this line in three places:
@@ -105,7 +121,7 @@ It shows `battery n/a` when no voltage reading is available. The version string 
 
 ## Battery and power
 
-- **Sampling:** the battery is read every `BATTERY_PERIOD_MS` (10 s), as the average of `BATTERY_SAMPLES` (16) ADC readings.
+- **Sampling:** the battery is read every `BATTERY_PERIOD_MS` (60 s), as the average of `BATTERY_SAMPLES` (16) ADC readings.
 - **Low battery:** below `BATTERY_LOW_MV` (3000 mV) the SD file is flushed and closed and the card is unmounted. The firmware waits up to 10 s for that, then the chip enters deep sleep with the LED pad held off.
 - **Waking up:** the chip wakes every `BATTERY_WAKE_PERIOD_S` (30 s; 0 means wake only on reset). It resumes only once the pack reads above `BATTERY_RESUME_MV` (3400 mV), so the voltage rebound of an unloaded cell does not restart logging. A reset or power cycle uses `BATTERY_LOW_MV` instead.
 - **Low at boot:** if the pack is already low at boot, the chip goes straight to deep sleep without mounting the card.
@@ -146,14 +162,15 @@ Project options live in `idf.py menuconfig` under `ESP-UART-BLE-Brigde-Options`:
 | `STATUS_LED_GPIO` | 7 | Status LED pin |
 | `LOG_LINE_PREFIX` | `[ESP] ` | Prefix of firmware log lines and of the status line |
 | `ENABLE_SDCARD` | y | Try to mount an SD card at boot |
-| `SDCARD_KEEP_BLE` | n | Keep BLE running while logging to SD |
+| `SDCARD_KEEP_BLE` | n | Keep BLE connectable while logging to SD |
+| `SDCARD_BLE_BEACON` | y | Advertise the battery voltage while logging to SD |
 | `SDCARD_BOOT_MARKER` | `SoC Firmware version: ` | Text that starts a new file |
 | `SDCARD_RTC_SET_MARKER` | `RTC SET: ` | Text before the RTC set time |
 | `SDCARD_RTC_UNSET_WINDOW_MIN` | 30 | Minutes after 01-01 00:00 treated as an unset clock |
 | `SDCARD_PIN_*` | 8 / 9 / 10 / 3 | SCK / MISO / MOSI / CS |
 | `SDCARD_SPI_FREQ_KHZ` | 20000 | SPI clock |
 | `ENABLE_BATTERY_MONITOR` | y | Battery monitor and low battery sleep |
-| `BATTERY_PERIOD_MS` | 10000 | Sampling period |
+| `BATTERY_PERIOD_MS` | 60000 | Sampling period |
 | `BATTERY_SAMPLES` | 16 | Samples per average |
 | `BATTERY_LOW_MV` | 3000 | Low battery threshold |
 | `BATTERY_RESUME_MV` | 3400 | Resume threshold after a low battery sleep |
@@ -172,7 +189,7 @@ These are compile-time constants rather than menuconfig options:
 - **`main.py`:** also subscribes to a second UART channel (`0xABF1` / `0xABF2`) that this firmware does not expose. Removing the `uart1` entry from `channels` in [tools/main.py](tools/main.py) should leave a working UART0 ↔ TCP bridge.
 - **`write_baud_rate.py`:** writes to baud rate characteristics (`0xABE3`, `0xABF3`) that this firmware does not expose either.
 
-BLE only runs when no SD card is mounted, or when `SDCARD_KEEP_BLE` is set. See [tools/README.md](tools/README.md) for usage.
+Clients can only connect when no SD card is mounted, or when `SDCARD_KEEP_BLE` is set. See [tools/README.md](tools/README.md) for usage.
 
 ## Repository layout
 

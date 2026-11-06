@@ -24,6 +24,12 @@ int gatt_svr_register(void);
 
 bool uart0_notify = 0;
 static uint16_t active_conn = BLE_HS_CONN_HANDLE_NONE;
+static bool sd_logging;
+/* Static because NimBLE keeps the field pointers for connection reattempts. */
+static char logger_adv_name[BLE_HS_ADV_MAX_SZ];
+static const ble_uuid16_t adv_uuids16[] = {
+    BLE_UUID16_INIT(BLE_SVC_SPP_UUID16_SECOND)};
+static struct ble_npl_callout logger_adv_timer;
 
 u_int16_t ble_spp_tx_handle_uart_0;
 u_int16_t ble_spp_rx_handle_uart_0;
@@ -57,13 +63,23 @@ static void ble_spp_server_print_conn_desc(struct ble_gap_conn_desc *desc) {
               desc->sec_state.bonded);
 }
 
-/**
- * Enables advertising with the following parameters:
- *     o General discoverable mode.
- *     o Undirected connectable mode.
- */
-static void ble_spp_server_advertise(void) {
-  struct ble_gap_adv_params adv_params;
+static const char *ble_logger_adv_name(void) {
+  const char *state =
+      sdcard_is_present() ? BLE_LOGGER_NAME : BLE_LOGGER_SD_FAIL_NAME;
+  uint32_t millivolts = battery_get_millivolts();
+
+  if (millivolts > 0U) {
+    snprintf(logger_adv_name, sizeof(logger_adv_name), "%s %u.%02uV", state,
+             (unsigned)(millivolts / 1000U),
+             (unsigned)((millivolts % 1000U) / 10U));
+  } else {
+    snprintf(logger_adv_name, sizeof(logger_adv_name), "%s", state);
+  }
+
+  return logger_adv_name;
+}
+
+static int ble_spp_server_set_adv_fields(void) {
   struct ble_hs_adv_fields fields;
   const char *name;
   int rc;
@@ -91,18 +107,34 @@ static void ble_spp_server_advertise(void) {
   fields.tx_pwr_lvl_is_present = 1;
   fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
 
-  name = ble_svc_gap_device_name();
+  name = sd_logging ? ble_logger_adv_name() : ble_svc_gap_device_name();
   fields.name = (uint8_t *)name;
   fields.name_len = strlen(name);
   fields.name_is_complete = 1;
 
-  fields.uuids16 = (ble_uuid16_t[]){BLE_UUID16_INIT(BLE_SVC_SPP_UUID16_SECOND)};
+  fields.uuids16 = adv_uuids16;
   fields.num_uuids16 = 1;
   fields.uuids16_is_complete = 1;
 
   rc = ble_gap_adv_set_fields(&fields);
   if (rc != 0) {
     MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
+  }
+
+  return rc;
+}
+
+/**
+ * Enables advertising with the following parameters:
+ *     o General discoverable mode.
+ *     o Undirected connectable mode, or ADV_NONCONN_IND while logging to SD
+ *       unless CONFIG_SDCARD_KEEP_BLE is set.
+ */
+static void ble_spp_server_advertise(void) {
+  struct ble_gap_adv_params adv_params;
+  int rc;
+
+  if (ble_spp_server_set_adv_fields() != 0) {
     return;
   }
 
@@ -110,6 +142,12 @@ static void ble_spp_server_advertise(void) {
   memset(&adv_params, 0, sizeof adv_params);
   adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
   adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+#if !CONFIG_SDCARD_KEEP_BLE
+  if (sd_logging) {
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_NON;
+  }
+#endif
   adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(BLE_ADV_ITVL_MIN_MS);
   adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(BLE_ADV_ITVL_MAX_MS);
   rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
@@ -247,6 +285,23 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg) {
   }
 }
 
+static void ble_logger_adv_timer_arm(void) {
+  ble_npl_error_t rc = ble_npl_callout_reset(
+      &logger_adv_timer, ble_npl_time_ms_to_ticks32(BLE_LOGGER_ADV_UPDATE_MS));
+
+  if (rc != BLE_NPL_OK) {
+    ESP_LOGE("BLE", "unable to arm advertisement update timer: %d", (int)rc);
+  }
+}
+
+/* Runs on the NimBLE host task, like every other advertising call. */
+static void ble_logger_adv_timer_cb(struct ble_npl_event *event) {
+  (void)event;
+
+  (void)ble_spp_server_set_adv_fields();
+  ble_logger_adv_timer_arm();
+}
+
 static void ble_spp_server_on_reset(int reason) {
   MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason);
 }
@@ -313,6 +368,22 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
   return 0;
 }
 
+static int ble_battery_chr_access(uint16_t conn_handle, uint16_t attr_handle,
+                                  struct ble_gatt_access_ctxt *ctxt,
+                                  void *arg) {
+  char value[BLE_BATTERY_VALUE_SIZE] = "n/a";
+  uint32_t millivolts = battery_get_millivolts();
+
+  if (millivolts > 0U) {
+    snprintf(value, sizeof(value), "%u.%03u", (unsigned)(millivolts / 1000U),
+             (unsigned)(millivolts % 1000U));
+  }
+
+  return (os_mbuf_append(ctxt->om, value, strlen(value)) == 0)
+             ? 0
+             : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 /* Define new custom service */
 static const struct ble_gatt_svc_def new_ble_svc_gatt_defs[] = {
     {
@@ -334,6 +405,11 @@ static const struct ble_gatt_svc_def new_ble_svc_gatt_defs[] = {
                     .access_cb = ble_svc_gatt_handler,
                     .val_handle = &ble_spp_tx_handle_uart_0,
                     .flags = BLE_GATT_CHR_F_NOTIFY,
+                },
+                {
+                    .uuid = BLE_UUID16_DECLARE(BLE_SVC_SPP_CHR_UUID16_BATTERY),
+                    .access_cb = ble_battery_chr_access,
+                    .flags = BLE_GATT_CHR_F_READ,
                 },
                 {0}},
     },
@@ -572,12 +648,10 @@ void app_main(void) {
 
   console_start_status_monitor();
 
-  bool logging = false;
-
 #if CONFIG_ENABLE_SDCARD
-  logging = sdcard_init();
+  sd_logging = sdcard_init();
 
-  if (logging) {
+  if (sd_logging) {
     MODLOG_DFLT(INFO, "SD card detected, UART0 data is logged to file\n");
   }
 #endif
@@ -586,8 +660,8 @@ void app_main(void) {
 
   ble_spp_uart_init(&Port0);
 
-#if !CONFIG_SDCARD_KEEP_BLE
-  if (logging) {
+#if !CONFIG_SDCARD_KEEP_BLE && !CONFIG_SDCARD_BLE_BEACON
+  if (sd_logging) {
     ESP_LOGW("BLE", "logging to SD card, BLE not started");
     return;
   }
@@ -636,6 +710,13 @@ void app_main(void) {
   assert(rc == 0);
   /* XXX Need to have template for store */
   ble_store_config_init();
+
+  if (sd_logging) {
+    ble_npl_callout_init(&logger_adv_timer, nimble_port_get_dflt_eventq(),
+                         ble_logger_adv_timer_cb, NULL);
+    ble_logger_adv_timer_arm();
+  }
+
   nimble_port_freertos_init(ble_spp_server_host_task);
   ble_att_set_preferred_mtu(BLE_PREFERRED_MTU);
 }

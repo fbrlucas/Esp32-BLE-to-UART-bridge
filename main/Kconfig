@@ -62,8 +62,23 @@ config SDCARD_KEEP_BLE
     default n
     help
         While a card is mounted UART0 data is not notified over BLE, so BLE
-        only serves clients writing to UART0. Disabled, NimBLE is not started
-        when a card is mounted. Enabled, it keeps advertising while logging.
+        only serves clients writing to UART0. Enabled, advertising stays
+        connectable while logging. Disabled, clients cannot connect while a
+        card is mounted, and NimBLE is not started at all unless
+        SDCARD_BLE_BEACON is set.
+
+config SDCARD_BLE_BEACON
+    bool "Advertise battery voltage while logging"
+    depends on ENABLE_SDCARD
+    default y
+    help
+        While a card is mounted, advertise non-connectable with the battery
+        voltage in the device name, e.g. "UART-Logger 3.91V", so any BLE
+        scanner shows it without connecting. The name changes to
+        "UART-SD-Fail 3.91V" if logging stopped on a card error. Nothing is
+        advertised during a low battery sleep. Disable this and
+        SDCARD_KEEP_BLE to keep NimBLE off while logging. With SDCARD_KEEP_BLE
+        the same name is used, but advertising is connectable.
 
 config SDCARD_BOOT_MARKER
     string "Device boot marker"
@@ -136,7 +151,7 @@ config BATTERY_PERIOD_MS
     int "Sampling period (ms)"
     depends on ENABLE_BATTERY_MONITOR
     range 1000 600000
-    default 10000
+    default 60000
 
 config BATTERY_SAMPLES
     int "Samples averaged per measurement"

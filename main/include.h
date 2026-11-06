@@ -57,12 +57,21 @@ extern "C" {
 
 #define BLE_SVC_SPP_CHR_UUID16_WRITE_UART_0                              0xABE1
 #define BLE_SVC_SPP_CHR_UUID16_READ_UART_0                               0xABE2
+/* 0xABE3 is the baud rate characteristic tools/write_baud_rate.py writes to. */
+#define BLE_SVC_SPP_CHR_UUID16_BATTERY                                   0xABE4
+
+/* Fits "%u.%03u" for any uint32_t millivolt reading, plus the NUL. */
+#define BLE_BATTERY_VALUE_SIZE                                           12
 
 #define BLE_DEFAULT_MTU                                                  20
 #define BLE_PREFERRED_MTU                                                517
 #define BLE_HEADER_SIZE                                                  3
 
 #define BLE_ADVERTISING_NAME                                                 "UART-to-BLE-Bridge"
+
+#define BLE_LOGGER_NAME                                                  "UART-Logger"
+#define BLE_LOGGER_SD_FAIL_NAME                                          "UART-SD-Fail"
+#define BLE_LOGGER_ADV_UPDATE_MS                                         60000
 
 
 #define BLE_ADV_ITVL_MIN_MS                                              1000
